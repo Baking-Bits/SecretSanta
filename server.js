@@ -693,8 +693,10 @@ app.get('*', (req, res) => {
   return res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-const server = app.listen(PORT, '127.0.0.1', () => {
-  console.log(`Server listening on port ${PORT} (127.0.0.1)`);
+// Bind address: allow override via BIND_ADDR, but default to 0.0.0.0 so container is reachable
+const BIND_ADDR = process.env.BIND_ADDR || '0.0.0.0';
+const server = app.listen(PORT, BIND_ADDR, () => {
+  console.log(`Server listening on port ${PORT} (${BIND_ADDR})`);
 });
 
 server.on('error', (err) => {
