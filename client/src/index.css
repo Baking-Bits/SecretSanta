@@ -103,11 +103,35 @@ button{
 
 .small{font-size:13px;color:var(--muted)}
 
+/* Prominent empty-list warning shown on the 'Your List' card when no items exist */
+.empty-warning{background:linear-gradient(90deg,var(--christmas-red), #d43a3f);color:white;padding:12px;border-radius:10px;border:1px solid rgba(0,0,0,0.06);box-shadow:0 8px 28px rgba(196,33,41,0.08)}
+.empty-warning strong{display:block;font-size:15px}
+
 .items{margin-top:8px}
 
 .meta{display:flex;gap:8px;align-items:center}
 
 .footer{margin-top:18px;color:var(--muted);font-size:13px}
+
+/* Music controls shown in the footer */
+.music-controls{display:flex;align-items:center;gap:10px;margin-top:8px}
+.music-controls .mute-btn{padding:6px 8px;border-radius:8px;border:1px solid rgba(11,18,32,0.06);background:transparent;cursor:pointer}
+.music-controls .play-btn{padding:6px 10px;border-radius:8px;border:0;background:var(--accent);color:white}
+.music-controls input[type="range"]{width:140px}
+.music-controls .label{font-size:12px;color:var(--muted)}
+
+/* Floating music card container at bottom center */
+.music-card-container{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;display:flex;gap:10px;z-index:80;pointer-events:auto}
+.music-card{background:var(--card);border-radius:10px;padding:0 8px;border:1px solid rgba(11,18,32,0.06);box-shadow:0 8px 18px rgba(11,18,32,0.12);display:flex;align-items:center;gap:10px;min-width:180px}
+.music-card.compact{min-width:140px;padding:0 6px}
+.music-card .multi-btn{padding:6px;border-radius:8px;border:0;background:var(--accent);color:white;cursor:pointer;min-width:48px}
+.music-card .volume-wrap{display:flex;align-items:center;gap:8px}
+
+@media(max-width:520px){
+	.music-card-container{left:12px;right:12px;transform:none;bottom:12px}
+	.music-card{flex:1;justify-content:space-between}
+	.music-controls input[type="range"], .music-card input[type="range"]{width:84px}
+}
 
 .link{color:var(--accent);text-decoration:none}
 

@@ -88,6 +88,12 @@ export default function App(){
   const [recipientItems, setRecipientItems] = useState([])
   const [drawExists, setDrawExists] = useState(false)
   const [hasRevealed, setHasRevealed] = useState(getInitialRevealState)
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const userMenuRef = React.useRef(null)
+  const musicRef = React.useRef(null)
+  const [musicPlaying, setMusicPlaying] = useState(false)
+  const [musicMuted, setMusicMuted] = useState(()=>{ try { return localStorage.getItem('musicMuted') === '1' } catch(e){ return false } })
+  const [musicVolume, setMusicVolume] = useState(()=>{ try { const v = localStorage.getItem('musicVolume'); return v !== null ? parseFloat(v) : 0.8 } catch(e) { return 0.8 } })
 
   useEffect(()=>{
     const token = localStorage.getItem('token')
@@ -127,6 +133,18 @@ export default function App(){
       }
     })()
   }, [authed])
+
+  // Close user menu when clicking outside
+  useEffect(()=>{
+    if (!userMenuOpen) return
+    const onDocClick = (e) => {
+      try {
+        if (userMenuRef.current && !userMenuRef.current.contains(e.target)) setUserMenuOpen(false)
+      } catch (err) {}
+    }
+    document.addEventListener('click', onDocClick)
+    return ()=>document.removeEventListener('click', onDocClick)
+  }, [userMenuOpen])
 
   useEffect(()=>{
     if (!authed) return
@@ -329,6 +347,38 @@ export default function App(){
     }
   }
 
+  // Share a generic reminder asking the group to add wishlist items.
+  // This intentionally avoids naming the specific profile to preserve anonymity.
+  const shareReminder = async (/* profileId */) => {
+    try {
+      const subject = `Reminder: add wishlist items for Secret Santa`
+      const body = `Hi everyone,\n\nThis is a friendly reminder to add wishlist items for Secret Santa if you haven't already. Adding a few gift ideas makes it much easier for your Secret Santa to pick something you'll enjoy.\n\nOpen the app to add items: ${window.location.origin}\n\nThanks!`
+
+      // Prefer Web Share on mobile if available
+      if (navigator && navigator.share) {
+        try {
+          await navigator.share({ title: subject, text: body, url: window.location.origin })
+          return
+        } catch (e) {
+          // fallthrough to copy fallback
+        }
+      }
+
+      // Fallback: copy to clipboard
+      if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(body)
+        alert('Reminder copied to clipboard. Paste into your messaging app to notify the group.')
+        return
+      }
+
+      // If clipboard isn't available, show the message so the user can copy it manually
+      try { prompt('Reminder (copy and paste to your group chat):', body) } catch(e) { alert('Could not prepare reminder. Please manually notify the group.') }
+    } catch (err) {
+      console.error('shareReminder failed', err)
+      alert('Could not prepare reminder. Please manually notify the group.')
+    }
+  }
+
   // Audio playback for the login page: attempts to play a supplied /login.mp3
   // and falls back to a short generated jingle if autoplay is blocked.
   const audioRef = React.useRef(null)
@@ -352,70 +402,145 @@ export default function App(){
     }
   }
 
+  // Try to play the login audio (or fall back to the generated jingle).
+  // Called on explicit user gestures (e.g. clicking the big draw card) so
+  // browsers will allow playback.
+  async function tryPlayAudio() {
+    try {
+      let el = audioRef.current || document.getElementById('login-audio')
+      if (el) {
+        audioRef.current = el
+        el.volume = 0.8
+        try {
+          await el.play()
+          return
+        } catch (err) {
+          // playback failed even after a gesture — fallback to generated tone
+          try { playGeneratedJingle() } catch (e) {}
+          return
+        }
+      }
+      // no audio element available; play generated jingle
+      try { playGeneratedJingle() } catch (e) {}
+    } catch (e) {
+      try { playGeneratedJingle() } catch (er) {}
+    }
+  }
+
+  // Homepage music controls
+  async function toggleMusicPlay() {
+    try {
+      const el = musicRef.current || document.getElementById('homepage-audio') || document.getElementById('login-audio')
+      if (!el) return
+      if (!musicPlaying) {
+        try {
+          await el.play()
+          setMusicPlaying(true)
+          return
+        } catch (err) {
+          // fallback to generated jingle if playback blocked
+          try { playGeneratedJingle(); setMusicPlaying(true) } catch(e){}
+        }
+      } else {
+        try { el.pause(); el.currentTime = 0 } catch(e){}
+        setMusicPlaying(false)
+      }
+    } catch (e) {
+      console.warn('toggleMusicPlay failed', e)
+    }
+  }
+
+  function toggleMute() {
+    try {
+      const next = !musicMuted
+      setMusicMuted(next)
+      try { localStorage.setItem('musicMuted', next ? '1' : '0') } catch(e){}
+      const el = musicRef.current || document.getElementById('homepage-audio') || document.getElementById('login-audio')
+      if (el) el.muted = next
+    } catch (e) { console.warn('toggleMute failed', e) }
+  }
+
+  function handleVolumeChange(e) {
+    try {
+      const v = Number(e.target.value)
+      setMusicVolume(v)
+      try { localStorage.setItem('musicVolume', String(v)) } catch(e){}
+      const el = musicRef.current || document.getElementById('homepage-audio') || document.getElementById('login-audio')
+      if (el) el.volume = v
+    } catch (e) { console.warn('volume change failed', e) }
+  }
+
+  // Keep audio element properties in sync with state
+  useEffect(()=>{
+    const el = musicRef.current || document.getElementById('homepage-audio') || document.getElementById('login-audio')
+    if (!el) return
+    try { el.muted = !!musicMuted } catch(e){}
+    try { el.volume = typeof musicVolume === 'number' ? musicVolume : 0.8 } catch(e){}
+    const onEnded = ()=> setMusicPlaying(false)
+    el.addEventListener && el.addEventListener('ended', onEnded)
+    return ()=>{ try { el.removeEventListener && el.removeEventListener('ended', onEnded) } catch(e){} }
+  }, [musicMuted, musicVolume])
+
   React.useEffect(()=>{
-    let interactionHandler = null
-    let cleanup = () => {}
+    // Avoid attempting to autoplay on mount (browsers will block and log errors).
+    // Instead, attach a single user-gesture handler that will try to play the
+    // audio element (if present) or fall back to a generated jingle.
+    let handler = null
+    const installHandler = () => {
+      if (handler) return
+      handler = async function oncePlay() {
+        try {
+          const el = document.getElementById('login-audio')
+          if (el) {
+            audioRef.current = el
+            el.volume = 0.8
+            try {
+              await el.play()
+              return
+            } catch (playErr) {
+              // Playback after interaction failed — fallback to generated jingle
+              try { playGeneratedJingle() } catch(e){}
+              return
+            }
+          }
+          // no audio element; play generated jingle
+          try { playGeneratedJingle() } catch(e){}
+        } finally {
+          document.removeEventListener('click', handler)
+          document.removeEventListener('keydown', handler)
+          document.removeEventListener('touchstart', handler)
+          handler = null
+        }
+      }
+      document.addEventListener('click', handler, { once: true })
+      document.addEventListener('keydown', handler, { once: true })
+      document.addEventListener('touchstart', handler, { once: true })
+    }
+
     if (!authed) {
       try {
-        const el = document.getElementById('login-audio')
-        if (el) {
-          audioRef.current = el
-          el.volume = 0.8
-          const p = el.play()
-          if (p && p.catch) {
-            p.catch(err => {
-              console.warn('Autoplay blocked initially, will wait for user interaction', err)
-              // Wait for a user gesture to try again (click/keydown/touchstart)
-              interactionHandler = function oncePlay() {
-                try {
-                  const p2 = el.play()
-                  if (p2 && p2.catch) p2.catch(e2 => { console.warn('Playback after interaction failed', e2); playGeneratedJingle() })
-                } catch (e3) {
-                  console.warn('Playback after interaction threw', e3); playGeneratedJingle()
-                }
-                // remove listeners after first interaction
-                document.removeEventListener('click', interactionHandler)
-                document.removeEventListener('keydown', interactionHandler)
-                document.removeEventListener('touchstart', interactionHandler)
-              }
-              document.addEventListener('click', interactionHandler, { once: true })
-              document.addEventListener('keydown', interactionHandler, { once: true })
-              document.addEventListener('touchstart', interactionHandler, { once: true })
-              // ensure cleanup removes listeners if effect unmounts
-              cleanup = () => {
-                try {
-                  document.removeEventListener('click', interactionHandler)
-                  document.removeEventListener('keydown', interactionHandler)
-                  document.removeEventListener('touchstart', interactionHandler)
-                } catch (e) {}
-              }
-            })
-          }
-        } else {
-          // No audio file provided — use generated jingle on first interaction
-          interactionHandler = function onceJingle(){ playGeneratedJingle(); document.removeEventListener('click', interactionHandler); document.removeEventListener('keydown', interactionHandler); document.removeEventListener('touchstart', interactionHandler) }
-          document.addEventListener('click', interactionHandler, { once: true })
-          document.addEventListener('keydown', interactionHandler, { once: true })
-          document.addEventListener('touchstart', interactionHandler, { once: true })
-          cleanup = () => {
-            try {
-              document.removeEventListener('click', interactionHandler)
-              document.removeEventListener('keydown', interactionHandler)
-              document.removeEventListener('touchstart', interactionHandler)
-            } catch (e) {}
-          }
-        }
+        installHandler()
       } catch (err) {
-        console.warn('Login audio setup failed', err)
+        // Do not spam the console from the audio setup — failures are non-critical
+        console.warn('Login audio setup failed', err && (err.message || err))
       }
     } else {
+      // On auth, stop any playing audio
       if (audioRef.current) {
         try { audioRef.current.pause(); audioRef.current.currentTime = 0 } catch(e){}
         audioRef.current = null
       }
     }
+
     return ()=>{
-      try { cleanup() } catch(e){}
+      try {
+        if (handler) {
+          try { document.removeEventListener('click', handler) } catch(e){}
+          try { document.removeEventListener('keydown', handler) } catch(e){}
+          try { document.removeEventListener('touchstart', handler) } catch(e){}
+          handler = null
+        }
+      } catch(e){}
       if (audioRef.current) {
         try { audioRef.current.pause(); audioRef.current.currentTime = 0 } catch(e){}
         audioRef.current = null
@@ -446,6 +571,8 @@ export default function App(){
   }
 
   const handleReveal = async () => {
+    // start audio on user gesture when revealing
+    try { await tryPlayAudio() } catch(e){}
     // New draw-from-hat experience:
     // 1) Ensure a draw exists (run it silently if needed)
     // 2) Fetch my assignment (but don't reveal yet)
@@ -610,7 +737,11 @@ export default function App(){
       </div>
 
       <div className="login-panel">
-        <audio id="login-audio" src="/login.mp3" preload="auto" aria-hidden="true" />
+        {/* Provide multiple audio sources so the server can serve whichever file exists */}
+        <audio id="login-audio" preload="auto" aria-hidden="true">
+          <source src="/Audiio_Beren_Beyond_Christmas-Tree.wav" type="audio/wav" />
+          <source src="/login.mp3" type="audio/mpeg" />
+        </audio>
         <div className="login-card">
           <h2 style={{marginTop:0}}>Login or Register</h2>
           <div className="form-row">
@@ -764,6 +895,13 @@ export default function App(){
         <div className="card big-option" style={{marginTop:12}} role="button" tabIndex={0} onClick={() => { setPage('your'); refreshItems(); }} onKeyPress={(e)=>{ if(e.key==='Enter') { setPage('your'); refreshItems(); } }}>
           <h3 style={{marginTop:0}}>View and Edit your Wishlist</h3>
           <div>
+            {/* Prominent homepage warning if the current user's wishlist is empty */}
+            {myClaim && items && items.length === 0 ? (
+              <div className="empty-warning" style={{marginTop:8, padding:10}}>
+                <strong>You haven't added any wishlist items yet.</strong>
+                <div style={{marginTop:6}}>Click here to add a few gift ideas so your Secret Santa knows what you'd like.</div>
+              </div>
+            ) : null}
             {items.length === 0 ? (
               <div>
                 <div className="small">You have no items yet.</div>
@@ -802,6 +940,12 @@ export default function App(){
           <div className="small" style={{marginTop:8,color:'var(--muted)'}}>
             Copied lists are for external use. To update your wishlist, please use this site so changes are persisted.
           </div>
+          {items.length === 0 ? (
+            <div className="empty-warning" style={{marginTop:12}}>
+              <strong>You have no wishlist items yet.</strong>
+              <div style={{marginTop:6}}>Please add a few gift ideas so your Secret Santa knows what you'd like — it only takes a minute.</div>
+            </div>
+          ) : null}
           <div className="items" style={{marginTop:12}}>
             {items.map(it => (
               <div key={it.id} className="card">
@@ -857,22 +1001,49 @@ export default function App(){
     let content = null
     if (!viewingProfileId) content = <div className="small">Select a profile to view their list.</div>
     else if (!drawExists) content = <div className="small">Secret Santa has not been picked yet.</div>
-    else content = (
-      <div className="items">
-        {items.map(it => (
-              <div key={it.id} className="card">
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-              <div><strong dangerouslySetInnerHTML={{__html:escapeHtml(it.title)}} /></div>
-                      {it.link ? (
-                      <button className="btn ghost icon-link" onClick={()=>{ try { window.open(it.link, '_blank', 'noopener,noreferrer'); } catch(e){ window.location.href = it.link } }} title="Open link" aria-label="Open link">
-                        <Paperclip />
-                      </button>
-                    ) : null}
-            </div>
+    else if (items && items.length === 0) {
+      const prof = (profiles || []).find(p => p.id === viewingProfileId)
+      const profName = prof && prof.name ? prof.name : 'This person'
+      content = (
+        <div>
+          <div className="empty-warning" style={{marginTop:8}}>
+            <strong>{profName} hasn't added any wishlist items yet — shame on them.</strong>
+            <div style={{marginTop:6}}>Please ask them to add a few gift ideas so their Secret Santa has something to choose.</div>
           </div>
-        ))}
-      </div>
-    )
+          <div style={{marginTop:10, display:'flex', gap:8}}>
+            <button className="btn primary" onClick={()=>shareReminder(viewingProfileId)}>Remind Group</button>
+            <button className="btn" onClick={async ()=>{
+              const body = `Hi everyone,\n\nThis is a friendly reminder to add wishlist items for Secret Santa if you haven't already. Adding a few gift ideas makes it much easier for your Secret Santa to pick something you'll enjoy.\n\nOpen the app: ${window.location.origin}\n\nThanks!`
+              try {
+                if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+                  await navigator.clipboard.writeText(body)
+                  alert('Reminder copied to clipboard. Paste into your messaging app to notify the group.')
+                } else {
+                  try { prompt('Reminder (copy and paste to your group chat):', body) } catch(e) { alert('Clipboard not available; please manually notify the group.') }
+                }
+              } catch(e) { console.warn('copy reminder failed', e); alert('Could not copy reminder') }
+            }}>Copy Reminder</button>
+          </div>
+        </div>
+      )
+    } else {
+      content = (
+        <div className="items">
+          {items.map(it => (
+            <div key={it.id} className="card">
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <div><strong dangerouslySetInnerHTML={{__html:escapeHtml(it.title)}} /></div>
+                {it.link ? (
+                  <button className="btn ghost icon-link" onClick={()=>{ try { window.open(it.link, '_blank', 'noopener,noreferrer'); } catch(e){ window.location.href = it.link } }} title="Open link" aria-label="Open link">
+                    <Paperclip />
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      )
+    }
     pageContent = (
       <div className="card">
         <h3 style={{marginTop:0}}>Their List</h3>
@@ -987,21 +1158,28 @@ export default function App(){
         <div style={{display:'flex',gap:8,alignItems:'center'}}>
           <button className={`btn ${page==='home'?'primary':''}`} onClick={()=>{ setPage('home'); }}>Home</button>
         </div>
-        <div style={{display:'flex',gap:8,alignItems:'center'}}>
-          <button className="btn" onClick={async ()=>{ const r = await API('/api/draw-preview?useProfiles=1'); if (r && r.preview) { setPreviewAssignments(r.preview); } else { alert('Preview failed'); } }}>Test Raffle</button>
-          {currentUser && currentUser.email === 'patheinecke@gmail.com' ? (
-            <button className={`btn ${drawExists ? 'ghost' : 'primary'}`} onClick={async ()=>{
-              if (drawExists) {
-                // Turn OFF
-                await resetDraw()
-              } else {
-                // Turn ON
-                await handleRunDraw()
-              }
-            }}>{drawExists ? 'Turn Secret Santa OFF' : 'Turn Secret Santa ON'}</button>
+        <div style={{display:'flex',gap:8,alignItems:'center',position:'relative'}} ref={userMenuRef}>
+          <button className="btn" aria-haspopup="true" aria-expanded={userMenuOpen} onClick={()=>setUserMenuOpen(v=>!v)}>
+            {currentUser && (currentUser.name || currentUser.email) ? (currentUser.name || currentUser.email) : 'User'} ▾
+          </button>
+          {userMenuOpen ? (
+            <div style={{position:'absolute',right:0,top:'calc(100% + 8px)',minWidth:220,background:'#fff',border:'1px solid rgba(0,0,0,0.06)',boxShadow:'0 6px 18px rgba(0,0,0,0.08)',borderRadius:8,zIndex:40,padding:8}}>
+              <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                <button className="btn ghost" onClick={async ()=>{ setUserMenuOpen(false); const r = await API('/api/draw-preview?useProfiles=1'); if (r && r.preview) { setPreviewAssignments(r.preview); } else { alert('Preview failed'); } }}>Test Raffle</button>
+                {currentUser && currentUser.email === 'patheinecke@gmail.com' ? (
+                  <button className={`btn ${drawExists ? 'ghost' : 'primary'}`} onClick={async ()=>{
+                    setUserMenuOpen(false)
+                    if (drawExists) {
+                      await resetDraw()
+                    } else {
+                      await handleRunDraw()
+                    }
+                  }}>{drawExists ? 'Turn Secret Santa OFF' : 'Turn Secret Santa ON'}</button>
+                ) : null}
+                <button className="btn" onClick={()=>{ setUserMenuOpen(false); logout(); }}>Logout</button>
+              </div>
+            </div>
           ) : null}
-          
-          <button className="btn ghost" onClick={logout}>Logout</button>
         </div>
       </div>
 
@@ -1010,7 +1188,26 @@ export default function App(){
       {previewModal}
       {revealModalEl}
 
-      <div className="footer">Built for family use — mobile friendly.</div>
+      <div>
+        <div className="footer">Built for family use — mobile friendly.</div>
+        {/* Floating music cards positioned at bottom center */}
+        <div className="music-card-container" aria-hidden={!authed}>
+          <div className="music-card" role="region" aria-label="Music controls">
+            <audio id="homepage-audio" preload="auto" ref={musicRef} loop style={{display:'none'}}>
+              <source src="/Audiio_Beren_Beyond_Christmas-Tree.wav" type="audio/wav" />
+              <source src="/login.mp3" type="audio/mpeg" />
+            </audio>
+            {/* Play / Pause button (single control) */}
+            <button className="multi-btn" onClick={async ()=>{ try { await toggleMusicPlay() } catch(e){ console.warn('play/pause failed', e) } }} title={musicPlaying ? 'Pause' : 'Play'} aria-label={musicPlaying ? 'Pause music' : 'Play music'}>
+              {musicPlaying ? '⏸' : '▶'}
+            </button>
+
+            <div className="volume-wrap" style={{display:'flex',alignItems:'center',gap:8}}>
+              <input type="range" min="0" max="1" step="0.01" value={musicVolume} onChange={handleVolumeChange} aria-label="Music volume" />
+            </div>
+          </div>
+        </div>
+      </div>
       <div className="snow" aria-hidden="true">
         <span className="flake" style={{left:'5%', animationDuration:'12s', fontSize:10}}>❄</span>
         <span className="flake" style={{left:'20%', animationDuration:'9s', fontSize:14}}>❄</span>
