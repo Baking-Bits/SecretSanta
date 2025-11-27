@@ -249,8 +249,20 @@ app.post('/api/wishlist', authMiddleware, async (req, res) => {
   try {
     const result = await query('INSERT INTO items (user_id, title, link) VALUES (?, ?, ?)', [req.user.id, title, link || null]);
     const insertId = result.insertId;
-    const [rows] = await pool.execute('SELECT id, title, link, created_at FROM items WHERE id = ?', [insertId]);
-    res.json({ item: rows[0] });
+    const [newRow] = await pool.execute('SELECT id, title, link, created_at FROM items WHERE id = ?', [insertId]);
+
+    // Return refreshed list for the frontend so the UI can update immediately
+    const items = await query(`
+      SELECT i.id, i.user_id, i.title, i.link, i.created_at,
+        IFNULL(f.cnt,0) AS favorites_count,
+        IF(EXISTS(SELECT 1 FROM favorites fx WHERE fx.item_id = i.id AND fx.user_id = ?), 1, 0) AS favorited_by_owner
+      FROM items i
+      LEFT JOIN (SELECT item_id, COUNT(*) AS cnt FROM favorites GROUP BY item_id) f ON f.item_id = i.id
+      WHERE i.user_id = ?
+      ORDER BY i.created_at DESC
+    `, [req.user.id, req.user.id]);
+
+    res.json({ ok: true, item: newRow[0], items });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -343,113 +355,110 @@ app.post('/api/draw', authMiddleware, async (req, res) => {
     const recipientProfiles = rows.map(r => r.profile_id);
 
     // Build bipartite graph between givers (left) and recipientProfiles (right)
-    const ids = recipientProfiles.slice();
-    const idToIndex = {};
-    ids.forEach((id, idx) => { idToIndex[id] = idx; });
-    const n = ids.length;
-    const adj = Array.from({ length: n }, () => []);
-    // Map giver profile ids to left indices in same order as ids
-    const giverIds = givers.map(g => g.profile_id);
-    const giverIndex = {};
-    giverIds.forEach((id, i) => { giverIndex[id] = i; });
-
-    for (let i = 0; i < givers.length; i++) {
-      const g = givers[i];
-      for (const cand of recipientProfiles) {
-        if (cand === g.profile_id) continue;
-        if (g.partner_profile_id && cand === g.partner_profile_id) continue;
-        const v = idToIndex[cand];
-        if (typeof v !== 'undefined') adj[i].push(v);
+    // To avoid deterministic bias and increase randomness, try multiple random shuffles
+    // of the recipient order and candidate lists before giving up.
+    function shuffleArray(a) {
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
       }
     }
 
-    // Hopcroft-Karp implementation
-    function hopcroftKarp() {
-      const INF = 1e9;
-      const pairU = Array(n).fill(-1);
-      const pairV = Array(n).fill(-1);
-      const dist = Array(n).fill(0);
+    let finalPairU = null;
+    let finalIds = null;
+    let finalMatchSize = 0;
+    const MAX_ATTEMPTS = 50;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      // shuffle recipient order and per-giver candidate order
+      const ids = recipientProfiles.slice();
+      shuffleArray(ids);
+      const idToIndex = {};
+      ids.forEach((id, idx) => { idToIndex[id] = idx; });
+      const n = ids.length;
+      const adj = Array.from({ length: n }, () => []);
 
-      function bfs() {
-        const queue = [];
-        for (let u = 0; u < n; u++) {
-          if (pairU[u] === -1) { dist[u] = 0; queue.push(u); }
-          else dist[u] = INF;
+      for (let i = 0; i < givers.length; i++) {
+        const g = givers[i];
+        const candidates = recipientProfiles.slice();
+        shuffleArray(candidates);
+        for (const cand of candidates) {
+          if (cand === g.profile_id) continue;
+          if (g.partner_profile_id && cand === g.partner_profile_id) continue;
+          const v = idToIndex[cand];
+          if (typeof v !== 'undefined') adj[i].push(v);
         }
-        let found = false;
-        while (queue.length) {
-          const u = queue.shift();
+      }
+
+      // Hopcroft-Karp implementation (uses local adj/n)
+      (function() {
+        const INF = 1e9;
+        const pairU = Array(n).fill(-1);
+        const pairV = Array(n).fill(-1);
+        const dist = Array(n).fill(0);
+
+        function bfs() {
+          const queue = [];
+          for (let u = 0; u < n; u++) {
+            if (pairU[u] === -1) { dist[u] = 0; queue.push(u); }
+            else dist[u] = INF;
+          }
+          let found = false;
+          while (queue.length) {
+            const u = queue.shift();
+            for (const v of adj[u]) {
+              const pu = pairV[v];
+              if (pu !== -1 && dist[pu] === INF) {
+                dist[pu] = dist[u] + 1;
+                queue.push(pu);
+              }
+              if (pu === -1) found = true;
+            }
+          }
+          return found;
+        }
+
+        function dfs(u) {
           for (const v of adj[u]) {
             const pu = pairV[v];
-            if (pu !== -1 && dist[pu] === INF) {
-              dist[pu] = dist[u] + 1;
-              queue.push(pu);
+            if (pu === -1 || (dist[pu] === dist[u] + 1 && dfs(pu))) {
+              pairU[u] = v; pairV[v] = u; return true;
             }
-            if (pu === -1) found = true;
           }
+          dist[u] = INF; return false;
         }
-        return found;
-      }
 
-      function dfs(u) {
-        for (const v of adj[u]) {
-          const pu = pairV[v];
-          if (pu === -1 || (dist[pu] === dist[u] + 1 && dfs(pu))) {
-            pairU[u] = v; pairV[v] = u; return true;
-          }
+        let result = 0;
+        while (bfs()) {
+          for (let u = 0; u < n; u++) if (pairU[u] === -1) if (dfs(u)) result++;
         }
-        dist[u] = INF; return false;
-      }
 
-      let result = 0;
-      while (bfs()) {
-        for (let u = 0; u < n; u++) if (pairU[u] === -1) if (dfs(u)) result++;
-      }
-      return { pairU, pairV, result };
+        if (result === givers.length) {
+          finalPairU = pairU.slice();
+          finalIds = ids.slice();
+          finalMatchSize = result;
+        }
+      })();
+
+      if (finalMatchSize === givers.length) break;
     }
 
-    const { pairU, result: matchSize } = hopcroftKarp();
-
-    if (matchSize < givers.length) {
-      // diagnostics
+    if (finalMatchSize < givers.length) {
+      // diagnostics (safe version that doesn't rely on inner-scoped variables)
       try {
         const participantCount = givers.length;
         const claimedCount = rows.filter(r => !!r.claimed_user_id).length;
         const partnerMap = {};
         for (const r of rows) partnerMap[r.profile_id] = r.partner_profile_id || null;
 
-        // compute per-giver options
+        // compute per-giver options conservatively using recipientProfiles
         const perGiverOptions = {};
         for (let i = 0; i < givers.length; i++) {
-          perGiverOptions[givers[i].profile_id] = adj[i].map(v => ids[v]);
+          const g = givers[i];
+          const opts = recipientProfiles.filter(cand => cand !== g.profile_id && !(g.partner_profile_id && cand === g.partner_profile_id));
+          perGiverOptions[g.profile_id] = opts;
         }
 
-        // find givers with zero options
         const impossibleGivers = Object.keys(perGiverOptions).filter(k => perGiverOptions[k].length === 0);
-
-        // find alternating-reachable sets for Hall witness
-        const visitedU = Array(n).fill(false);
-        const visitedV = Array(n).fill(false);
-        const queue = [];
-        for (let u = 0; u < n; u++) if (pairU[u] === -1) { visitedU[u] = true; queue.push(u); }
-        while (queue.length) {
-          const u = queue.shift();
-          for (const v of adj[u]) {
-            if (!visitedV[v]) {
-              visitedV[v] = true;
-              const pu = pairV[v];
-              if (pu !== -1 && !visitedU[pu]) { visitedU[pu] = true; queue.push(pu); }
-            }
-          }
-        }
-        const reachableLeft = new Set();
-        for (let u = 0; u < n; u++) if (visitedU[u]) reachableLeft.add(givers[u].profile_id);
-        const S = givers.map(g => g.profile_id).filter(id => !reachableLeft.has(id));
-        const NofS = new Set();
-        for (const sid of S) {
-          const u = giverIndex[sid];
-          for (const v of adj[u]) NofS.add(ids[v]);
-        }
 
         const diag = {
           timestamp: new Date().toISOString(),
@@ -457,8 +466,6 @@ app.post('/api/draw', authMiddleware, async (req, res) => {
           claimedCount,
           partnerMap,
           impossibleGivers,
-          hall_witness_S: S,
-          hall_witness_N_of_S: Array.from(NofS),
           perGiverOptions: Object.fromEntries(Object.entries(perGiverOptions).slice(0, 50))
         };
         console.error('Draw failed to produce assignments (max matching < participants)', diag);
@@ -489,12 +496,12 @@ app.post('/api/draw', authMiddleware, async (req, res) => {
       return res.status(500).json({ error: 'Could not produce valid assignments (no perfect matching)' });
     }
 
-    // Persist assignments from pairU mapping
+    // Persist assignments from finalPairU mapping
     await query('DELETE FROM assignments');
     for (let u = 0; u < givers.length; u++) {
-      const v = pairU[u];
+      const v = finalPairU[u];
       const giverProfileId = givers[u].profile_id;
-      const recipientProfileId = ids[v];
+      const recipientProfileId = finalIds[v];
       const found = rows.find(r => r.profile_id === giverProfileId);
       if (found && found.claimed_user_id) {
         await query('INSERT INTO assignments (giver_user_id, giver_profile_id, recipient_profile_id) VALUES (?, NULL, ?)', [found.claimed_user_id, recipientProfileId]);
@@ -560,67 +567,130 @@ app.post('/api/draw-reset', authMiddleware, async (req, res) => {
 // If query param `useProfiles=1` is provided, use all profiles (even unclaimed) as participants.
 app.get('/api/draw-preview', authMiddleware, async (req, res) => {
   try {
+    // Use the same randomized Hopcroft-Karp based matching as the production draw,
+    // but do not persist results. This increases variability for previews.
     const useProfiles = req.query && (req.query.useProfiles === '1' || req.query.useProfiles === 'true');
     let rows;
     if (useProfiles) {
-      // participants are profiles table (id, name, partner_profile_id)
       rows = await query('SELECT id AS profile_id, name, partner_profile_id FROM profiles');
       if (!rows || rows.length === 0) return res.status(400).json({ error: 'No profiles available to run draw' });
-      // build givers as profiles (no giver_user_id)
-      var givers = rows.map(r => ({ giver_profile_id: r.profile_id, giver_name: r.name, profile_id: r.profile_id, partner_profile_id: r.partner_profile_id }));
+      var givers = rows.map(r => ({ profile_id: r.profile_id, partner_profile_id: r.partner_profile_id }));
       var recipientProfiles = rows.map(r => r.profile_id);
     } else {
-      // participants are claimed profiles (profile + giver user)
       rows = await query('SELECT p.id AS profile_id, p.partner_profile_id, c.user_id AS giver_user_id, p.name FROM profiles p JOIN claims c ON p.id = c.profile_id');
       if (!rows || rows.length === 0) return res.status(400).json({ error: 'No claimed profiles to run draw' });
-      givers = rows.map(r => ({ giver_user_id: r.giver_user_id, profile_id: r.profile_id, partner_profile_id: r.partner_profile_id, giver_name: r.name }));
+      givers = rows.map(r => ({ profile_id: r.profile_id, partner_profile_id: r.partner_profile_id, claimed_user_id: r.giver_user_id }));
       recipientProfiles = rows.map(r => r.profile_id);
     }
 
-    function tryAssign() {
-      const shuffled = recipientProfiles.slice().sort(() => Math.random() - 0.5);
-      const assignments = {};
-      const used = new Set();
-      for (const giver of givers) {
-        let found = false;
-        for (let i = 0; i < shuffled.length; i++) {
-          const cand = shuffled[i];
-          if (used.has(cand)) continue;
-          if (cand === giver.profile_id) continue;
-          if (giver.partner_profile_id && cand === giver.partner_profile_id) continue;
-          // key by giver_profile_id (string) so output is consistent
-          assignments[String(giver.profile_id)] = cand;
-          used.add(cand);
-          found = true;
-          break;
-        }
-        if (!found) return null;
+    // Randomized matching helper (same approach as /api/draw)
+    function shuffleArray(a) {
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
       }
-      return assignments;
     }
 
-    let result = null;
-    const maxTries = 2000;
-    for (let t = 0; t < maxTries; t++) {
-      const r = tryAssign();
-      if (r) { result = r; break; }
-    }
-    if (!result) return res.status(500).json({ error: 'Could not produce valid assignments' });
+    let finalPairU = null;
+    let finalIds = null;
+    let finalMatchSize = 0;
+    const MAX_ATTEMPTS = 50;
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const ids = recipientProfiles.slice();
+      shuffleArray(ids);
+      const idToIndex = {};
+      ids.forEach((id, idx) => { idToIndex[id] = idx; });
+      const n = ids.length;
+      const adj = Array.from({ length: n }, () => []);
 
-    // Build human-readable mapping: use profile names for giver and recipient
-    const giverProfileIds = Object.keys(result).map(x => parseInt(x, 10));
-    const recipientIds = Object.values(result);
-    const profileIds = Array.from(new Set(giverProfileIds.concat(recipientIds)));
-    const profRows = await query('SELECT id, name FROM profiles WHERE id IN (' + profileIds.map(()=>'?').join(',') + ')', profileIds);
+      for (let i = 0; i < givers.length; i++) {
+        const g = givers[i];
+        const candidates = recipientProfiles.slice();
+        shuffleArray(candidates);
+        for (const cand of candidates) {
+          if (cand === g.profile_id) continue;
+          if (g.partner_profile_id && cand === g.partner_profile_id) continue;
+          const v = idToIndex[cand];
+          if (typeof v !== 'undefined') adj[i].push(v);
+        }
+      }
+
+      // Hopcroft-Karp (local)
+      (function() {
+        const INF = 1e9;
+        const pairU = Array(n).fill(-1);
+        const pairV = Array(n).fill(-1);
+        const dist = Array(n).fill(0);
+
+        function bfs() {
+          const queue = [];
+          for (let u = 0; u < n; u++) {
+            if (pairU[u] === -1) { dist[u] = 0; queue.push(u); }
+            else dist[u] = INF;
+          }
+          let found = false;
+          while (queue.length) {
+            const u = queue.shift();
+            for (const v of adj[u]) {
+              const pu = pairV[v];
+              if (pu !== -1 && dist[pu] === INF) {
+                dist[pu] = dist[u] + 1;
+                queue.push(pu);
+              }
+              if (pu === -1) found = true;
+            }
+          }
+          return found;
+        }
+
+        function dfs(u) {
+          for (const v of adj[u]) {
+            const pu = pairV[v];
+            if (pu === -1 || (dist[pu] === dist[u] + 1 && dfs(pu))) {
+              pairU[u] = v; pairV[v] = u; return true;
+            }
+          }
+          dist[u] = INF; return false;
+        }
+
+        let result = 0;
+        while (bfs()) {
+          for (let u = 0; u < n; u++) if (pairU[u] === -1) if (dfs(u)) result++;
+        }
+
+        if (result === givers.length) {
+          finalPairU = pairU.slice();
+          finalIds = ids.slice();
+          finalMatchSize = result;
+        }
+      })();
+
+      if (finalMatchSize === givers.length) break;
+    }
+
+    if (finalMatchSize < givers.length) return res.status(500).json({ error: 'Could not produce valid assignments' });
+
+    // Build human-readable mapping using profiles table
+    const giverProfileIds = givers.map(g => g.profile_id);
+    const profRows = await query('SELECT id, name FROM profiles WHERE id IN (' + giverProfileIds.map(()=>'?').join(',') + ')', giverProfileIds);
     const profById = {};
     for (const r of profRows) profById[r.id] = r;
 
     const out = [];
-    for (const giverProfileIdStr of Object.keys(result)) {
-      const gpid = parseInt(giverProfileIdStr, 10);
-      const rid = result[giverProfileIdStr];
-      out.push({ giver_profile_id: gpid, giver_name: (profById[gpid] && profById[gpid].name) || null, recipient_profile_id: rid, recipient_name: (profById[rid] && profById[rid].name) || null });
+    for (let u = 0; u < finalPairU.length; u++) {
+      const giverProfileId = givers[u].profile_id;
+      const v = finalPairU[u];
+      const recipientProfileId = finalIds[v];
+      out.push({ giver_profile_id: giverProfileId, giver_name: (profById[giverProfileId] && profById[giverProfileId].name) || null, recipient_profile_id: recipientProfileId, recipient_name: null });
     }
+
+    // enrich recipient names in one query
+    const recipientIds = out.map(o => o.recipient_profile_id);
+    const allIds = Array.from(new Set(recipientIds.concat(out.map(o=>o.giver_profile_id))));
+    const names = await query('SELECT id, name FROM profiles WHERE id IN (' + allIds.map(()=>'?').join(',') + ')', allIds);
+    const nameById = {};
+    for (const r of names) nameById[r.id] = r.name;
+    out.forEach(o => { o.giver_name = o.giver_name || nameById[o.giver_profile_id] || null; o.recipient_name = nameById[o.recipient_profile_id] || null; });
 
     res.json({ preview: out });
   } catch (err) {

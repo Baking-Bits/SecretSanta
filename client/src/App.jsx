@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { StarSolid, StarOutline, Pencil, Trash, Paperclip } from './icons'
 import './index.css'
 
 // Debugging aid: log when the module is evaluated
@@ -262,6 +263,42 @@ export default function App(){
     }
   }
 
+  // Inline edit state for wishlist items
+  const [editingItemId, setEditingItemId] = useState(null)
+  const [editTitle, setEditTitle] = useState('')
+  const [editLink, setEditLink] = useState('')
+  const [editLoading, setEditLoading] = useState(false)
+
+  const startEdit = (it) => {
+    setEditingItemId(it.id)
+    setEditTitle(it.title || '')
+    setEditLink(it.link || '')
+  }
+  const cancelEdit = () => {
+    setEditingItemId(null)
+    setEditTitle('')
+    setEditLink('')
+    setEditLoading(false)
+  }
+  const saveEdit = async (id) => {
+    try {
+      setEditLoading(true)
+      const res = await API('/api/wishlist/' + id, { method: 'PUT', body: JSON.stringify({ title: editTitle, link: editLink }) })
+      setEditLoading(false)
+      if (res && res.item) {
+        // refresh local list
+        await refreshItems()
+        cancelEdit()
+      } else {
+        setMsg(res && res.error ? res.error : 'Could not save changes')
+      }
+    } catch (e) {
+      console.error('Save edit error', e)
+      setEditLoading(false)
+      setMsg('Error saving item')
+    }
+  }
+
   const copyWishlist = async () => {
     try {
       if (!items || items.length === 0) return alert('No items to copy')
@@ -292,6 +329,100 @@ export default function App(){
     }
   }
 
+  // Audio playback for the login page: attempts to play a supplied /login.mp3
+  // and falls back to a short generated jingle if autoplay is blocked.
+  const audioRef = React.useRef(null)
+  function playGeneratedJingle() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext
+      if (!Ctx) return
+      const ctx = new Ctx()
+      const o = ctx.createOscillator()
+      const g = ctx.createGain()
+      o.type = 'sine'
+      o.frequency.setValueAtTime(880, ctx.currentTime)
+      g.gain.setValueAtTime(0.0001, ctx.currentTime)
+      g.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.02)
+      o.connect(g); g.connect(ctx.destination)
+      o.start()
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 1.0)
+      setTimeout(()=>{ try { o.stop(); ctx.close(); } catch(e){} }, 1100)
+    } catch (e) {
+      console.warn('WebAudio fallback failed', e)
+    }
+  }
+
+  React.useEffect(()=>{
+    let interactionHandler = null
+    let cleanup = () => {}
+    if (!authed) {
+      try {
+        const el = document.getElementById('login-audio')
+        if (el) {
+          audioRef.current = el
+          el.volume = 0.8
+          const p = el.play()
+          if (p && p.catch) {
+            p.catch(err => {
+              console.warn('Autoplay blocked initially, will wait for user interaction', err)
+              // Wait for a user gesture to try again (click/keydown/touchstart)
+              interactionHandler = function oncePlay() {
+                try {
+                  const p2 = el.play()
+                  if (p2 && p2.catch) p2.catch(e2 => { console.warn('Playback after interaction failed', e2); playGeneratedJingle() })
+                } catch (e3) {
+                  console.warn('Playback after interaction threw', e3); playGeneratedJingle()
+                }
+                // remove listeners after first interaction
+                document.removeEventListener('click', interactionHandler)
+                document.removeEventListener('keydown', interactionHandler)
+                document.removeEventListener('touchstart', interactionHandler)
+              }
+              document.addEventListener('click', interactionHandler, { once: true })
+              document.addEventListener('keydown', interactionHandler, { once: true })
+              document.addEventListener('touchstart', interactionHandler, { once: true })
+              // ensure cleanup removes listeners if effect unmounts
+              cleanup = () => {
+                try {
+                  document.removeEventListener('click', interactionHandler)
+                  document.removeEventListener('keydown', interactionHandler)
+                  document.removeEventListener('touchstart', interactionHandler)
+                } catch (e) {}
+              }
+            })
+          }
+        } else {
+          // No audio file provided — use generated jingle on first interaction
+          interactionHandler = function onceJingle(){ playGeneratedJingle(); document.removeEventListener('click', interactionHandler); document.removeEventListener('keydown', interactionHandler); document.removeEventListener('touchstart', interactionHandler) }
+          document.addEventListener('click', interactionHandler, { once: true })
+          document.addEventListener('keydown', interactionHandler, { once: true })
+          document.addEventListener('touchstart', interactionHandler, { once: true })
+          cleanup = () => {
+            try {
+              document.removeEventListener('click', interactionHandler)
+              document.removeEventListener('keydown', interactionHandler)
+              document.removeEventListener('touchstart', interactionHandler)
+            } catch (e) {}
+          }
+        }
+      } catch (err) {
+        console.warn('Login audio setup failed', err)
+      }
+    } else {
+      if (audioRef.current) {
+        try { audioRef.current.pause(); audioRef.current.currentTime = 0 } catch(e){}
+        audioRef.current = null
+      }
+    }
+    return ()=>{
+      try { cleanup() } catch(e){}
+      if (audioRef.current) {
+        try { audioRef.current.pause(); audioRef.current.currentTime = 0 } catch(e){}
+        audioRef.current = null
+      }
+    }
+  }, [authed])
+
   const runDraw = async ({ silent } = {}) => {
     const r = await API('/api/draw', { method: 'POST' })
     if (r && r.assignments) {
@@ -315,28 +446,91 @@ export default function App(){
   }
 
   const handleReveal = async () => {
-    if (!drawExists) {
-      const ok = await runDraw({ silent: true })
-      if (!ok) {
-        setMsg('Draw could not be run yet. Please try again or contact admin.')
-        return
+    // New draw-from-hat experience:
+    // 1) Ensure a draw exists (run it silently if needed)
+    // 2) Fetch my assignment (but don't reveal yet)
+    // 3) Build a set of face-down cards (one per profile) and animate shuffling
+    // 4) Let user pick a card; reveal the assignment if they chose the right card
+    try {
+      if (!drawExists) {
+        const ok = await runDraw({ silent: true })
+        if (!ok) {
+          setMsg('Draw could not be run yet. Please try again or contact admin.')
+          return
+        }
       }
-    }
-    setRevealModal(true)
-    setRevealLoading(true)
-    setRevealResult(null)
-    setTimeout(async () => {
+
+      setRevealModal(true)
+      setRevealLoading(true)
+      setRevealResult(null)
+
+      // fetch assignment (we will reveal it only after user picks a card)
       const r = await API('/api/my-assignment')
-      if (r && r.assignment) {
-        setRevealResult(r.assignment)
-        setHasRevealed(true)
-        try { localStorage.setItem('hasRevealed', '1') } catch (err) { console.warn('Could not persist reveal flag', err) }
-        await fetchMyAssignment()
-      } else {
-        setRevealResult(null)
-      }
+      let assignment = null
+      if (r && r.assignment) assignment = r.assignment
+
+      // number of cards equals number of profiles minus one (you cannot pick yourself)
+      let count = (profiles && profiles.length) ? Math.max(2, profiles.length - 1) : 4
+      if (count < 2) count = 2
+      const MAX_CARDS = 30
+      if (count > MAX_CARDS) count = MAX_CARDS
+
+      // create cards array and randomly select a target index for the real assignment
+      const cards = Array.from({ length: count }).map((_, i) => ({ id: i, revealed: false }))
+      const targetIndex = Math.floor(Math.random() * count)
+
+      setDrawCards(cards)
+      setShuffleActive(true)
+      setPickAllowed(false)
+      setPickMessage('Shuffle the cards and pick one!')
+
+      // perform shuffling animation by reordering cards for a period
+      // We'll capture the final order so we can freeze a deterministic winning card id
+      let ticks = 0
+      const maxTicks = 20 // shuffle for ~20 * 120ms = 2.4s
+      let lastArr = null
+      // clear any previous winning mapping
+      setWinningCardId(null)
+      setPendingAssignment({ assignment, targetIndex })
+      const interval = setInterval(() => {
+        // shuffle cards order in state to animate
+        setDrawCards(prev => {
+          const arr = prev.slice()
+          for (let i = arr.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1))
+            const tmp = arr[i]
+            arr[i] = arr[j]
+            arr[j] = tmp
+          }
+          lastArr = arr
+          return arr
+        })
+        ticks++
+        if (ticks >= maxTicks) {
+          clearInterval(interval)
+          // Freeze the mapping: choose the winning card id based on the
+          // final shuffled order and the original targetIndex.
+          try {
+            const finalOrder = (lastArr || []).map(c => c.id)
+            const winId = finalOrder[targetIndex] ?? finalOrder[0]
+            setWinningCardId(winId)
+          } catch (e) {
+            console.warn('Could not determine winning card id', e)
+            setWinningCardId(null)
+          }
+          setShuffleActive(false)
+          setPickAllowed(true)
+          setPickMessage('Click a card to reveal your person')
+        }
+      }, 120)
+
       setRevealLoading(false)
-    }, 1400)
+    } catch (err) {
+      console.error('Reveal flow failed', err)
+      setMsg('Could not start reveal. Please try again.')
+      setRevealLoading(false)
+      setRevealModal(true)
+    }
   }
 
   const resetDraw = async () => {
@@ -358,6 +552,49 @@ export default function App(){
     }
   }
 
+  // Draw UI state: cards, shuffling, pending assignment info
+  const [drawCards, setDrawCards] = useState(null)
+  const [shuffleActive, setShuffleActive] = useState(false)
+  const [pickAllowed, setPickAllowed] = useState(false)
+  const [pickMessage, setPickMessage] = useState('')
+  const [pendingAssignment, setPendingAssignment] = useState(null)
+  const [winningCardId, setWinningCardId] = useState(null)
+
+  const handleCardPick = async (cardId) => {
+    if (!pickAllowed) return
+    setPickAllowed(false)
+    try {
+      // Simplified UX: any card reveals your person. All cards lead to the same assignment.
+      if (!pendingAssignment) {
+        setMsg('No assignment available yet')
+        setPickAllowed(true)
+        return
+      }
+      // Reveal the assignment immediately
+      setRevealResult(pendingAssignment.assignment)
+      setHasRevealed(true)
+      try { localStorage.setItem('hasRevealed', '1') } catch (err) { console.warn('Could not persist reveal flag', err) }
+      // visually mark all cards as revealed so they all show the same recipient
+      setDrawCards(prev => prev ? prev.map(c => Object.assign({}, c, { revealed: true })) : prev)
+      // simulate that one card (someone else picking) is removed from the pool
+      // after a short delay so users see the reveal first
+      setTimeout(()=>{
+        setDrawCards(prev => {
+          if (!prev || prev.length <= 1) return prev
+          // remove one card from the end to represent a taken card
+          const next = prev.slice(0, prev.length - 1)
+          return next
+        })
+      }, 900)
+      await fetchMyAssignment()
+      setPickMessage('You found your person!')
+    } catch (err) {
+      console.error('Card pick failed', err)
+      setMsg('Error during pick; please try again')
+      setPickAllowed(true)
+    }
+  }
+
   if (!authed) return (
     <div className="auth-page">
       <div className="hero-area">
@@ -373,6 +610,7 @@ export default function App(){
       </div>
 
       <div className="login-panel">
+        <audio id="login-audio" src="/login.mp3" preload="auto" aria-hidden="true" />
         <div className="login-card">
           <h2 style={{marginTop:0}}>Login or Register</h2>
           <div className="form-row">
@@ -487,7 +725,11 @@ export default function App(){
             <div key={it.id} className="card">
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
                 <div><strong dangerouslySetInnerHTML={{__html:escapeHtml(it.title)}} /></div>
-                {it.link? <a className="link" href={it.link} target="_blank" rel="noreferrer">link</a>:null}
+                  {it.link ? (
+                    <button className="btn ghost icon-link" onClick={()=>{ try { window.open(it.link, '_blank', 'noopener,noreferrer'); } catch(e){ window.location.href = it.link } }} title="Open link" aria-label="Open link">
+                      <Paperclip />
+                    </button>
+                  ) : null}
               </div>
             </div>
           ))}
@@ -564,11 +806,44 @@ export default function App(){
             {items.map(it => (
               <div key={it.id} className="card">
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
-                  <div style={{flex:1}}><strong dangerouslySetInnerHTML={{__html:escapeHtml(it.title)}} /></div>
-                  {it.link? <a className="link" href={it.link} target="_blank" rel="noreferrer">link</a>:null}
+                  <div style={{flex:1}}>
+                    {editingItemId === it.id ? (
+                      <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                        <input value={editTitle} onChange={e=>setEditTitle(e.target.value)} />
+                        <input value={editLink} onChange={e=>setEditLink(e.target.value)} placeholder="Optional link (URL)" />
+                      </div>
+                    ) : (
+                      <strong dangerouslySetInnerHTML={{__html:escapeHtml(it.title)}} />
+                    )}
+                  </div>
+                    {it.link && editingItemId !== it.id ? (
+                      <button className="btn ghost icon-link" onClick={()=>{ try { window.open(it.link, '_blank', 'noopener,noreferrer'); } catch(e){ window.location.href = it.link } }} title="Open link" aria-label="Open link">
+                        <Paperclip />
+                      </button>
+                    ) : null}
                   <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                    <button className={`btn ${it.favorited_by_owner? 'primary':''}`} onClick={()=>toggleFavorite(it.id, !!it.favorited_by_owner)} style={{minWidth:72}}>{it.favorited_by_owner ? '★' : '☆'}</button>
-                    <button className="btn ghost" onClick={()=>deleteItem(it.id)} style={{minWidth:72}}>Remove</button>
+                    {editingItemId === it.id ? (
+                      <>
+                        <button className="btn primary" onClick={()=>saveEdit(it.id)} disabled={editLoading}>{editLoading ? 'Saving...' : 'Save'}</button>
+                        <button className="btn ghost" onClick={cancelEdit}>Cancel</button>
+                      </>
+                    ) : (
+                      <>
+                        <button className={`btn ${it.favorited_by_owner? 'primary':''}`} onClick={()=>toggleFavorite(it.id, !!it.favorited_by_owner)} style={{minWidth:44}} aria-label="favorite">
+                          {it.favorited_by_owner ? (
+                            <StarSolid />
+                          ) : (
+                            <StarOutline />
+                          )}
+                        </button>
+                        <button className="btn ghost" onClick={()=>startEdit(it)} title="Edit" aria-label="edit">
+                          <Pencil />
+                        </button>
+                        <button className="btn ghost" onClick={()=>deleteItem(it.id)} title="Delete" aria-label="delete">
+                          <Trash />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -585,10 +860,14 @@ export default function App(){
     else content = (
       <div className="items">
         {items.map(it => (
-          <div key={it.id} className="card">
+              <div key={it.id} className="card">
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
               <div><strong dangerouslySetInnerHTML={{__html:escapeHtml(it.title)}} /></div>
-              {it.link? <a className="link" href={it.link} target="_blank" rel="noreferrer">link</a>:null}
+                      {it.link ? (
+                      <button className="btn ghost icon-link" onClick={()=>{ try { window.open(it.link, '_blank', 'noopener,noreferrer'); } catch(e){ window.location.href = it.link } }} title="Open link" aria-label="Open link">
+                        <Paperclip />
+                      </button>
+                    ) : null}
             </div>
           </div>
         ))}
@@ -643,13 +922,17 @@ export default function App(){
         </div>
         <div style={{marginTop:12}}>
           <div className="small">Their wishlist:</div>
-          {revealResult.items && revealResult.items.length ? (
+                    {revealResult.items && revealResult.items.length ? (
             <div className="items" style={{marginTop:8}}>
               {revealResult.items.map(it => (
                 <div key={it.id} className="card">
                   <div style={{display:'flex',justifyContent:'space-between'}}>
                     <div><strong dangerouslySetInnerHTML={{__html:escapeHtml(it.title)}} /></div>
-                    {it.link? <a className="link" href={it.link} target="_blank" rel="noreferrer">link</a>:null}
+                    {it.link ? (
+                      <button className="btn ghost icon-link" onClick={()=>{ try { window.open(it.link, '_blank', 'noopener,noreferrer'); } catch(e){ window.location.href = it.link } }} title="Open link" aria-label="Open link">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true" focusable="false"><path d="M21.44 11.05l-8.49 8.49a5 5 0 0 1-7.07-7.07l6.36-6.36a3 3 0 0 1 4.24 4.24l-6.36 6.36a1 1 0 0 1-1.41-1.41l6.36-6.36"/></svg>
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               ))}
@@ -659,7 +942,33 @@ export default function App(){
       </div>
     )
   } else {
-    revealContent = <div className="small">No assignment available.</div>
+    // Interactive draw grid when a reveal is pending and we don't yet have a revealResult
+    if (drawCards && drawCards.length) {
+      revealContent = (
+        <div>
+          <div className="small">{pickMessage || 'Pick a card to reveal your person'}</div>
+          <div className="small" style={{marginTop:6}}>Recommended gift budget: <strong>$50</strong></div>
+          <div className={`draw-grid ${shuffleActive ? 'shuffling' : ''}`} style={{marginTop:12}}>
+            {drawCards.map(c => (
+              <div key={c.id} className={`draw-card ${c.revealed ? 'revealed' : ''} ${ (c.id === winningCardId && revealResult) ? 'flipped' : '' }`} onClick={()=>handleCardPick(c.id)} role="button" tabIndex={0}>
+                <div className={`card-inner ${shuffleActive ? 'shake' : ''}`}> 
+                  <div className="card-face card-back"><span className="label">?</span></div>
+                  <div className="card-face card-front">
+                    { (revealResult && c.id === winningCardId) ? (
+                      <span>{revealResult.recipient_name}</span>
+                    ) : (
+                      <span className="label">🎁</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )
+    } else {
+      revealContent = <div className="small">No assignment available.</div>
+    }
   }
 
   const revealModalEl = revealModal ? (
