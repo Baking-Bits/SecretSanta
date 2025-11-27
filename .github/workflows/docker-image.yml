@@ -26,12 +26,17 @@ jobs:
         run: |
           echo "SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
 
+      - name: Set lowercase owner and repo
+        run: |
+          echo "OWNER_LOWER=$(echo $GITHUB_REPOSITORY | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          echo "REPO_LOWER=$(echo $GITHUB_REPOSITORY | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
       - name: Build and push
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
-            ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ env.SHORT_SHA }}
+            ghcr.io/${{ env.OWNER_LOWER }}/${{ env.REPO_LOWER }}:latest
+            ghcr.io/${{ env.OWNER_LOWER }}/${{ env.REPO_LOWER }}:${{ github.sha }}
+            ghcr.io/${{ env.OWNER_LOWER }}/${{ env.REPO_LOWER }}:${{ env.SHORT_SHA }}
