@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1">
+      <stop offset="0%" stop-color="#f6f7fb"/>
+      <stop offset="50%" stop-color="#dfe7f5"/>
+      <stop offset="100%" stop-color="#c6daf0"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#g)"/>
+  <g transform="translate(80,760)">
+    <rect x="0" y="-560" width="1760" height="520" rx="12" fill="rgba(255,255,255,0.85)" />
+    <text x="40" y="-380" font-family="Inter, system-ui, -apple-system, 'Segoe UI', Roboto, Arial" font-size="72" fill="#0b1220">Gemini Generated Image</text>
+    <text x="40" y="-300" font-family="Inter, system-ui, -apple-system, 'Segoe UI', Roboto, Arial" font-size="36" fill="#334155">Placeholder - replace with final image</text>
+  </g>
+  <!-- Simple family icon at lower-left -->
+  <g transform="translate(64,820)" opacity="0.9">
+    <circle cx="40" cy="40" r="36" fill="#0b6b2e" />
+    <circle cx="110" cy="40" r="28" fill="#c81d25" />
+    <rect x="170" y="8" width="420" height="64" rx="8" fill="#ffffff" opacity="0.6" />
+  </g>
+</svg>

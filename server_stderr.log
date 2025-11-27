@@ -1,0 +1,17 @@
+Login error: Error: Access denied for user 'santa'@'192.168.1.208' (using password: YES)
+    at PromisePool.execute (B:\SecretSanta\node_modules\mysql2\lib\promise\pool.js:54:22)
+    at query (B:\SecretSanta\server.js:48:29)
+    at getUserByEmail (B:\SecretSanta\server.js:78:22)
+    at B:\SecretSanta\server.js:119:24
+    at Layer.handle [as handle_request] (B:\SecretSanta\node_modules\express\lib\router\layer.js:95:5)
+    at next (B:\SecretSanta\node_modules\express\lib\router\route.js:149:13)
+    at Route.dispatch (B:\SecretSanta\node_modules\express\lib\router\route.js:119:3)
+    at Layer.handle [as handle_request] (B:\SecretSanta\node_modules\express\lib\router\layer.js:95:5)
+    at B:\SecretSanta\node_modules\express\lib\router\index.js:284:15
+    at Function.process_params (B:\SecretSanta\node_modules\express\lib\router\index.js:346:12) {
+  code: 'ER_ACCESS_DENIED_ERROR',
+  errno: 1045,
+  sql: undefined,
+  sqlState: '28000',
+  sqlMessage: "Access denied for user 'santa'@'192.168.1.208' (using password: YES)"
+}

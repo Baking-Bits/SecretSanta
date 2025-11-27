@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Family Secret Santa</title>
+    <style>
+      body{font-family:Arial,Helvetica,sans-serif;max-width:900px;margin:20px auto;padding:10px}
+      input,button,textarea{padding:8px;margin:4px 0;width:100%}
+      .row{display:flex;gap:8px}
+      .col{flex:1}
+      .item{border:1px solid #ddd;padding:8px;margin:8px 0}
+    </style>
+  </head>
+  <body>
+    <h1>Family Secret Santa</h1>
+    <div id="auth">
+      <h2>Login / Register</h2>
+      <input id="email" placeholder="Email" />
+      <input id="password" placeholder="Password" type="password" />
+      <div class="row">
+        <button id="btnLogin">Login</button>
+        <button id="btnRegister">Register</button>
+      </div>
+      <div id="authMsg" style="color:red"></div>
+    </div>
+
+    <div id="app" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>Your Wishlist</h2>
+        <div>
+          <label>Show recommendations:</label>
+          <input id="recCount" type="number" value="5" style="width:60px" />
+          <button id="btnGetRecs">Get Recommendations</button>
+          <button id="btnLogout">Logout</button>
+        </div>
+      </div>
+
+      <div>
+        <h3>Add Item</h3>
+        <input id="itemTitle" placeholder="Gift title" />
+        <input id="itemLink" placeholder="Optional link (URL)" />
+        <label><input type="checkbox" id="itemRec" /> Recommend this item</label>
+        <button id="btnAdd">Add Item</button>
+      </div>
+
+      <div>
+        <h3>Items</h3>
+        <div id="items"></div>
+      </div>
+
+      <div>
+        <h3>Recommendations</h3>
+        <div id="recs"></div>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

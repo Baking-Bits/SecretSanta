@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log
+.env
+.env.local
+.git
+.github
+db/schema.sql
+README.md
+Dockerfile
+*.md

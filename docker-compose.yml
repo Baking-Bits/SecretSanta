@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  app:
+    build: .
+    image: secret-santa-app:latest
+    ports:
+      - "3000:3000"
+    environment:
+      # pass through either DATABASE_URL or DB_* vars from host .env
+      - DATABASE_URL=${DATABASE_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - JWT_SECRET=${JWT_SECRET}
+    restart: unless-stopped
