@@ -328,6 +328,26 @@ app.get('/api/profiles', async (req, res) => {
   }
 });
 
+// Aggregated wishlist counts per profile to avoid N roundtrips from clients
+app.get('/api/wishlist-counts', authMiddleware, async (req, res) => {
+  try {
+    // For each profile, count items belonging to the claimed user (if claimed). If unclaimed, count is 0.
+    const rows = await query(`
+      SELECT p.id AS profile_id, COUNT(i.id) AS item_count
+      FROM profiles p
+      LEFT JOIN claims c ON p.id = c.profile_id
+      LEFT JOIN items i ON i.user_id = c.user_id
+      GROUP BY p.id
+    `);
+    const counts = {};
+    for (const r of rows) counts[r.profile_id] = (r.item_count || 0);
+    res.json({ counts });
+  } catch (err) {
+    console.error('Error fetching wishlist counts:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Run Secret Santa draw for all claimed profiles (assign a recipient profile to each giver user)
 // Accessible to any authenticated user. If assignments exist, returns existing unless ?force=true
 // Production draw route (uses DB) — but if DEV_NO_DB is enabled we provide a lightweight in-memory draw.

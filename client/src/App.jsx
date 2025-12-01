@@ -94,6 +94,7 @@ export default function App(){
   const [musicPlaying, setMusicPlaying] = useState(false)
   const [musicMuted, setMusicMuted] = useState(()=>{ try { return localStorage.getItem('musicMuted') === '1' } catch(e){ return false } })
   const [musicVolume, setMusicVolume] = useState(()=>{ try { const v = localStorage.getItem('musicVolume'); return v !== null ? parseFloat(v) : 0.8 } catch(e) { return 0.8 } })
+  const [profileItemCounts, setProfileItemCounts] = useState(null)
 
   useEffect(()=>{
     const token = localStorage.getItem('token')
@@ -103,10 +104,8 @@ export default function App(){
       if (me && me.user) {
         setCurrentUser(me.user)
         setAuthed(true)
-        refreshItems()
       } else {
         setAuthed(true)
-        refreshItems()
       }
     })()
   }, [])
@@ -116,11 +115,11 @@ export default function App(){
     ;(async ()=>{
       try{
         const res = await API('/api/my-claim')
+        let claim = null
         if (res && res.claim) {
-          setMyClaim(res.claim)
-          setViewingProfileId(res.claim.id)
-        } else {
-          // still fetch profiles below
+          claim = res.claim
+          setMyClaim(claim)
+          setViewingProfileId(claim.id)
         }
         // Always fetch profiles so we can show helpful info (partner names, exclusions)
         const p = await API('/api/profiles')
@@ -128,6 +127,10 @@ export default function App(){
 
         const ds = await API('/api/draw-status')
         if (ds && typeof ds.hasAssignments !== 'undefined') setDrawExists(!!ds.hasAssignments)
+        // Ensure the current user's wishlist is loaded after we know their claim (avoids showing empty briefly)
+        try {
+          await refreshItems(claim && claim.id ? claim.id : undefined)
+        } catch (e) {}
       }catch(e){
         console.warn('Could not fetch claim/profiles', e)
       }
@@ -148,8 +151,32 @@ export default function App(){
 
   useEffect(()=>{
     if (!authed) return
-    if (page === 'home') fetchMyAssignment()
+    if (page === 'home') {
+      fetchMyAssignment()
+      // Also refresh the current user's wishlist so the home card shows accurate counts
+      try { refreshItems() } catch(e) {}
+    }
   }, [page, authed])
+
+  // Fetch wishlist counts for profiles when viewing the people page.
+  useEffect(()=>{
+    let cancelled = false
+    const loadCounts = async () => {
+      try {
+        if (page !== 'people') return
+        if (!profiles || !profiles.length) return
+        // Avoid refetching if we already have counts
+        if (profileItemCounts) return
+        const r = await API('/api/wishlist-counts')
+        if (!cancelled) {
+          if (r && r.counts) setProfileItemCounts(r.counts)
+          else setProfileItemCounts({})
+        }
+      } catch (e) { console.warn('Could not fetch profile wishlist counts', e); if (!cancelled) setProfileItemCounts({}) }
+    }
+    loadCounts()
+    return ()=>{ cancelled = true }
+  }, [page, profiles])
   const deleteItem = async (id) => {
     if (!confirm('Remove this item from your wishlist?')) return;
     try {
@@ -237,7 +264,10 @@ export default function App(){
 
   const refreshItems = async (profileId) => {
     try {
-      const pid = profileId || viewingProfileId || (myClaim && myClaim.id)
+      // Prefer an explicit profileId, then the current user's claim (myClaim),
+      // then fall back to the last-viewed profile. This avoids accidentally
+      // loading someone else's list when the user navigates back to "Your".
+      const pid = profileId || (myClaim && myClaim.id) || viewingProfileId
       const q = pid ? ('?profileId=' + encodeURIComponent(pid)) : ''
       const res = await API('/api/wishlist' + q)
       if (res && res.items) setItems(res.items)
@@ -892,9 +922,9 @@ export default function App(){
           {recipientPanel}
         </div>
 
-        <div className="card big-option" style={{marginTop:12}} role="button" tabIndex={0} onClick={() => { setPage('your'); refreshItems(); }} onKeyPress={(e)=>{ if(e.key==='Enter') { setPage('your'); refreshItems(); } }}>
+        <div className="card big-option" style={{marginTop:12}} role="button" tabIndex={0} onClick={async () => { const mine = myClaim && myClaim.id ? myClaim.id : null; setViewingProfileId(mine); setPage('your'); await refreshItems(mine); }} onKeyPress={async (e)=>{ if(e.key==='Enter') { const mine = myClaim && myClaim.id ? myClaim.id : null; setViewingProfileId(mine); setPage('your'); await refreshItems(mine); } }}>
           <h3 style={{marginTop:0}}>View and Edit your Wishlist</h3>
-          <div>
+          <div style={{minHeight:80}}>
             {/* Prominent homepage warning if the current user's wishlist is empty */}
             {myClaim && items && items.length === 0 ? (
               <div className="empty-warning" style={{marginTop:8, padding:10}}>
@@ -913,6 +943,15 @@ export default function App(){
                 <div className="small" style={{marginTop:8}}>Click to view and edit your wishlist.</div>
               </div>
             )}
+          </div>
+        </div>
+        <div className="card big-option" style={{marginTop:12}} role="button" tabIndex={0} onClick={() => { setPage('people'); }} onKeyPress={(e)=>{ if(e.key==='Enter') { setPage('people'); } }}>
+          <h3 style={{marginTop:0}}>Browse All Users' Lists</h3>
+          <div>
+            <div className="small">See everyone's wishlists in one place. Click to browse and view lists.</div>
+            <div style={{marginTop:10}}> 
+              <button className="btn" onClick={(e)=>{ e.stopPropagation(); setPage('people'); }}>Browse Users</button>
+            </div>
           </div>
         </div>
       </>
@@ -993,9 +1032,45 @@ export default function App(){
               </div>
             ))}
           </div>
+          
         </div>
       </div>
     )
+  } else if (page === 'people') {
+    // Browse all profiles and view their wishlists
+    pageContent = (
+      <div>
+        <div className="card">
+          <h3 style={{marginTop:0}}>Browse All Users' Lists</h3>
+          <div className="small" style={{marginBottom:8}}>Click a user to view their wishlist.</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:10,marginTop:8}}>
+            {(profiles || []).map(p => (
+              <div key={p.id} className="card" style={{display:'flex',flexDirection:'column',gap:8}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                  <div style={{fontWeight:700}}>{p.name || p.display_name || ('Profile ' + p.id)}</div>
+                  { /* shame badge for empty lists (if we have counts) */ }
+                  {(() => {
+                    try {
+                      const cnt = profileItemCounts && typeof profileItemCounts[p.id] !== 'undefined' ? profileItemCounts[p.id] : null
+                      if (cnt === 0) return <div className="shame-pill">No items</div>
+                      return null
+                    } catch (e) { return null }
+                  })()}
+                </div>
+                <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+                  <button className="btn" onClick={async ()=>{
+                    setViewingProfileId(p.id)
+                    setPage('their')
+                    await refreshItems(p.id)
+                  }}>View List</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
+    // (counts are loaded in an effect below)
   } else {
     // their page
     let content = null
@@ -1047,6 +1122,33 @@ export default function App(){
     pageContent = (
       <div className="card">
         <h3 style={{marginTop:0}}>Their List</h3>
+        {/* Show caution when viewing someone who is not your assigned recipient, unless the profile marks the list as public */}
+        {(() => {
+          try {
+            const prof = (profiles || []).find(p => p.id === viewingProfileId)
+            const viewingIsMe = myClaim && viewingProfileId && myClaim.id === viewingProfileId
+            const viewingIsMyRecipient = myAssignment && myAssignment.recipient_profile_id && (myAssignment.recipient_profile_id === viewingProfileId)
+            // Support several possible flags a profile might use to mark their list public
+            const publicFlags = ['public_list','wishlist_public','list_for_everyone','for_everyone','public_wishlist']
+            const isPublic = !!(prof && publicFlags.some(k => !!prof[k]))
+            if (!viewingIsMe && viewingProfileId && !viewingIsMyRecipient && !isPublic) {
+              return (
+                <div className="empty-warning" style={{marginBottom:12}}>
+                  <strong>Note:</strong>
+                  <div style={{marginTop:6}}>This wishlist is for that person's Secret Santa — if you aren't their Secret Santa, please don't buy from it.</div>
+                </div>
+              )
+            }
+            if (!viewingIsMe && viewingProfileId && !viewingIsMyRecipient && isPublic) {
+              return (
+                <div className="card" style={{marginBottom:12, background:'linear-gradient(90deg,#f3f7ff,#fbfbff)'}}>
+                  <div className="small"><strong>Note:</strong> This wishlist has been marked public by the owner — anyone may purchase from it.</div>
+                </div>
+              )
+            }
+          } catch (e) {}
+          return null
+        })()}
         {content}
       </div>
     )

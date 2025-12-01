@@ -133,6 +133,9 @@ button{
 	.music-controls input[type="range"], .music-card input[type="range"]{width:84px}
 }
 
+/* Small inline pill used on the Browse page to indicate no items (prevents layout jitter) */
+.shame-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;background:linear-gradient(180deg, rgba(255,244,244,0.95), rgba(255,240,240,0.95));color:var(--christmas-red);font-size:12px;border:1px solid rgba(200,29,37,0.08)}
+
 .link{color:var(--accent);text-decoration:none}
 
 /* Small circular icon button used for item links */
