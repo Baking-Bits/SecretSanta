@@ -37,7 +37,13 @@ const API = async (path, opts = {}) => {
 
   const url = base + path
   const res = await fetch(url, Object.assign({ headers }, opts))
+  const status = res.status
   const text = await res.text()
+
+  // Normalize unauthorized responses so callers can handle session expiry
+  if (status === 401) {
+    return { unauthorized: true, status, error: 'Unauthorized' }
+  }
 
   // If the server returned an HTML document (index.html), surface a clearer error
   if (typeof text === 'string' && text.trim().toLowerCase().startsWith('<!doctype html>')) {
@@ -95,17 +101,26 @@ export default function App(){
   const [musicMuted, setMusicMuted] = useState(()=>{ try { return localStorage.getItem('musicMuted') === '1' } catch(e){ return false } })
   const [musicVolume, setMusicVolume] = useState(()=>{ try { const v = localStorage.getItem('musicVolume'); return v !== null ? parseFloat(v) : 0.8 } catch(e) { return 0.8 } })
   const [profileItemCounts, setProfileItemCounts] = useState(null)
+  const handleUnauthorized = (resp) => {
+    if (resp && resp.unauthorized) {
+      logout()
+      setMsg('Session expired. Please log in again.')
+      return true
+    }
+    return false
+  }
 
   useEffect(()=>{
     const token = localStorage.getItem('token')
     if (!token) return
     ;(async ()=>{
       const me = await API('/api/me')
+      if (handleUnauthorized(me)) return
       if (me && me.user) {
         setCurrentUser(me.user)
         setAuthed(true)
       } else {
-        setAuthed(true)
+        setAuthed(false)
       }
     })()
   }, [])
@@ -115,6 +130,7 @@ export default function App(){
     ;(async ()=>{
       try{
         const res = await API('/api/my-claim')
+        if (handleUnauthorized(res)) return
         let claim = null
         if (res && res.claim) {
           claim = res.claim
@@ -123,9 +139,11 @@ export default function App(){
         }
         // Always fetch profiles so we can show helpful info (partner names, exclusions)
         const p = await API('/api/profiles')
+        if (handleUnauthorized(p)) return
         if (p && p.profiles) setProfiles(p.profiles)
 
         const ds = await API('/api/draw-status')
+        if (handleUnauthorized(ds)) return
         if (ds && typeof ds.hasAssignments !== 'undefined') setDrawExists(!!ds.hasAssignments)
         // Ensure the current user's wishlist is loaded after we know their claim (avoids showing empty briefly)
         try {
@@ -229,6 +247,7 @@ export default function App(){
   const doLogin = async () => {
     try {
       const res = await API('/api/login', { method: 'POST', body: JSON.stringify({ email, password }) })
+      if (handleUnauthorized(res)) return
       if (res && res.token) {
         localStorage.setItem('token', res.token)
         setCurrentUser(res.user || null)
@@ -247,6 +266,7 @@ export default function App(){
   const doRegister = async () => {
     try {
       const res = await API('/api/register', { method: 'POST', body: JSON.stringify({ email, password }) })
+      if (handleUnauthorized(res)) return
       if (res && res.token) {
         localStorage.setItem('token', res.token)
         setCurrentUser(res.user || null)
@@ -286,6 +306,11 @@ export default function App(){
         if (r.assignment.recipient_profile_id) {
           const rr = await API('/api/wishlist?profileId=' + encodeURIComponent(r.assignment.recipient_profile_id))
           setRecipientItems(rr && rr.items ? rr.items : [])
+        }
+        // If we have an assignment, treat it as already revealed so the UI doesn't prompt again.
+        if (!hasRevealed) {
+          setHasRevealed(true)
+          try { localStorage.setItem('hasRevealed', '1') } catch(e){}
         }
       } else {
         setMyAssignment(null)
@@ -845,7 +870,7 @@ export default function App(){
   if (page === 'home') {
     const recipientHeading = !drawExists
       ? 'Secret Santa Selections Happening Soon!'
-      : (hasRevealed && myAssignment ? (myAssignment.recipient_name || 'Your Recipient') : 'Ready to Pick Your Recipient?')
+      : (myAssignment ? (myAssignment.recipient_name || 'Your Recipient') : 'Ready to Pick Your Recipient?')
     let recipientPanel = null
     if (!drawExists) {
       // When draw not yet run, show helpful info including exclusions (partners/other SOs)
@@ -872,13 +897,6 @@ export default function App(){
           ) : null}
         </div>
       )
-    } else if (!hasRevealed) {
-      recipientPanel = (
-        <div>
-          <div className="small">When you are ready, click below to draw your person.</div>
-          <button className="btn primary" style={{marginTop:12}} onClick={handleReveal}>Draw My Person</button>
-        </div>
-      )
     } else if (myAssignment) {
       recipientPanel = (
         <div className="items">
@@ -894,6 +912,13 @@ export default function App(){
               </div>
             </div>
           ))}
+        </div>
+      )
+    } else if (!hasRevealed) {
+      recipientPanel = (
+        <div>
+          <div className="small">When you are ready, click below to draw your person.</div>
+          <button className="btn primary" style={{marginTop:12}} onClick={handleReveal}>Draw My Person</button>
         </div>
       )
     } else {
